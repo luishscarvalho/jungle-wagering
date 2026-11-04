@@ -3,7 +3,7 @@ import type { Response } from "express";
 import { DomainError } from "../../domain/shared/domain-error";
 import { FailureCode } from "../../domain/shared/failure-code";
 import { httpStatusOf } from "./failure-status";
-import { isTransientInfrastructureError } from "../transient-errors";
+import { describeError, isTransientInfrastructureError } from "../transient-errors";
 
 function codeForHttpStatus(status: number): FailureCode {
   if (status === HttpStatus.NOT_FOUND) return FailureCode.ResourceNotFound;
@@ -38,14 +38,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     if (isTransientInfrastructureError(exception)) {
-      this.logger.warn(`Transient infrastructure failure: ${(exception as Error).message}`);
+      this.logger.warn({ message: "Transient infrastructure failure", ...describeError(exception) });
       return {
         status: HttpStatus.SERVICE_UNAVAILABLE,
         body: { failureCode: FailureCode.InfrastructureUnavailable, message: "Temporarily unavailable, retry later" },
       };
     }
 
-    this.logger.error(exception instanceof Error ? (exception.stack ?? exception.message) : String(exception));
+    this.logger.error({ message: "Unexpected error", ...describeError(exception) });
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       body: { failureCode: FailureCode.ProcessingFailed, message: "Internal error" },

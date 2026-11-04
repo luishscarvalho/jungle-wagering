@@ -66,7 +66,7 @@ describe("domain errors", () => {
 
 describe("backoff", () => {
   test("doubles from 1s up to a 60s cap", () => {
-    const delays = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(backoffDelayMs);
+    const delays = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((retry) => backoffDelayMs(retry));
     expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000]);
   });
 
@@ -78,5 +78,16 @@ describe("backoff", () => {
     const now = new Date("2026-01-01T00:00:00.000Z");
     expect(nextAttemptAfter(now, 2)).toEqual(new Date("2026-01-01T00:00:02.000Z"));
     expect(now.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  });
+});
+
+describe("BackoffPolicy", () => {
+  test("base and cap can be replaced", () => {
+    const policy = { baseMs: 20, maxMs: 50 };
+    expect([1, 2, 3, 4].map((retry) => backoffDelayMs(retry, policy))).toEqual([20, 40, 50, 50]);
+  });
+
+  test("a huge retry count stays at the cap", () => {
+    expect(backoffDelayMs(100_000)).toBe(60_000);
   });
 });

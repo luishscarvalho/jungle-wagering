@@ -3,6 +3,7 @@ import { createTestDatabase, expectAppendOnly, insertLedgerEntry, insertTransact
 
 const TABLES = ["inbox_messages", "outbox_messages", "wager_transactions", "wallet_ledger_entries", "wallets"];
 const INDEXES = [
+  "outbox_messages_unpublished_aggregate_order",
   "outbox_messages_unpublished_due",
   "wager_transactions_one_opening_per_wallet",
   "wager_transactions_one_reversal_per_reference",
@@ -41,7 +42,7 @@ async function ledgerFunctionExists(): Promise<boolean> {
   return rows.length > 0;
 }
 
-describe("initial migration", () => {
+describe("migrations", () => {
   // Order matters: this walks the same database through up, down and up again.
   test("up creates tables, indexes and the ledger function", async () => {
     await db.orm.migrator.up();
@@ -54,12 +55,21 @@ describe("initial migration", () => {
     expect(await db.orm.migrator.up()).toEqual([]);
   });
 
-  test("down reverts everything, even with ledger rows present", async () => {
+  test("down reverts only the latest: the outbox index goes, the tables stay", async () => {
+    await db.orm.migrator.down();
+
+    expect(await publicIndexes()).toEqual(INDEXES.filter((index) => index !== "outbox_messages_unpublished_aggregate_order"));
+    expect(await publicTables()).toEqual(TABLES);
+    await db.orm.migrator.up();
+    expect(await publicIndexes()).toEqual(INDEXES);
+  });
+
+  test("down to the start reverts everything, even with ledger rows present", async () => {
     const wallet = await insertWallet(db.sql);
     const transaction = await insertTransaction(db.sql, wallet);
     await insertLedgerEntry(db.sql, wallet, transaction);
 
-    await db.orm.migrator.down();
+    await db.orm.migrator.down({ to: 0 });
 
     expect(await publicTables()).toEqual([]);
     expect(await publicIndexes()).toEqual([]);

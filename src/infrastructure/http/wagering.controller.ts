@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Headers, HttpStatus, Param, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpStatus, Inject, Param, Post, Res } from "@nestjs/common";
 import type { Response } from "express";
+import { APP_LOGGER, type AppLogger } from "../../application/ports";
 import { TransactionQueries } from "../../application/queries";
 import { RefusedError } from "../../application/refused-error";
 import { ProcessWagerTransaction } from "../../application/wager/process-wager-transaction";
@@ -20,11 +21,22 @@ function httpStatusOfResult(status: WagerTransactionStatus, failureCode: Failure
   }
 }
 
+/** Identifiers only: the amounts of a request stay out of the logs. */
+function logContext(idempotencyKey: string | undefined, body: unknown): Record<string, unknown> {
+  const { providerId, walletId } = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  return {
+    correlationId: idempotencyKey,
+    providerId: typeof providerId === "string" ? providerId : undefined,
+    walletId: typeof walletId === "string" ? walletId : undefined,
+  };
+}
+
 @Controller()
 export class WageringController {
   constructor(
     private readonly processWager: ProcessWagerTransaction,
     private readonly queries: TransactionQueries,
+    @Inject(APP_LOGGER) private readonly logger: AppLogger,
   ) {}
 
   @Post("wagering/transactions")
@@ -34,9 +46,20 @@ export class WageringController {
     @Res({ passthrough: true }) response: Response,
   ) {
     const result = await this.processWager.execute({ idempotencyKey, payload: body });
-    if (result.type === "refused") throw new RefusedError(result.failureCode, result.message);
+    const context = logContext(idempotencyKey, body);
+    if (result.type === "refused") {
+      this.logger.info("Transaction refused", { ...context, failureCode: result.failureCode });
+      throw new RefusedError(result.failureCode, result.message);
+    }
     if (result.type !== "result") throw new Error("HTTP requests do not use the inbox");
 
+    this.logger.info("Transaction submitted", {
+      ...context,
+      transactionId: result.view.transactionId,
+      status: result.view.status,
+      failureCode: result.view.failureCode,
+      idempotentReplay: result.view.idempotentReplay,
+    });
     response.status(httpStatusOfResult(result.view.status, result.view.failureCode));
     return result.view;
   }

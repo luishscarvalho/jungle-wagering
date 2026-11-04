@@ -1,5 +1,6 @@
 import {
   CreateQueueCommand,
+  DeleteMessageCommand,
   DeleteQueueCommand,
   GetQueueAttributesCommand,
   type Message,
@@ -24,6 +25,8 @@ export interface TestQueues {
   queueUrl: string;
   dlqName: string;
   dlqUrl: string;
+  eventsQueueName: string;
+  eventsUrl: string;
   drop(): Promise<void>;
 }
 
@@ -33,6 +36,7 @@ export async function createTestQueues(maxReceiveCount = 5): Promise<TestQueues>
   const suffix = randomUUIDv7().replaceAll("-", "");
   const dlqName = `test-dlq-${suffix}.fifo`;
   const queueName = `test-${suffix}.fifo`;
+  const eventsQueueName = `test-events-${suffix}.fifo`;
 
   const dlq = await client.send(new CreateQueueCommand({ QueueName: dlqName, Attributes: { FifoQueue: "true" } }));
   const dlqUrl = dlq.QueueUrl as string;
@@ -50,6 +54,13 @@ export async function createTestQueues(maxReceiveCount = 5): Promise<TestQueues>
     }),
   );
   const queueUrl = queue.QueueUrl as string;
+  const events = await client.send(
+    new CreateQueueCommand({
+      QueueName: eventsQueueName,
+      Attributes: { FifoQueue: "true", ContentBasedDeduplication: "false" },
+    }),
+  );
+  const eventsUrl = events.QueueUrl as string;
 
   return {
     client,
@@ -57,9 +68,12 @@ export async function createTestQueues(maxReceiveCount = 5): Promise<TestQueues>
     queueUrl,
     dlqName,
     dlqUrl,
+    eventsQueueName,
+    eventsUrl,
     async drop() {
       await client.send(new DeleteQueueCommand({ QueueUrl: queueUrl }));
       await client.send(new DeleteQueueCommand({ QueueUrl: dlqUrl }));
+      await client.send(new DeleteQueueCommand({ QueueUrl: eventsUrl }));
       client.destroy();
     },
   };
@@ -129,6 +143,35 @@ export async function readDlq(queues: TestQueues): Promise<Message[]> {
     }),
   );
   return Messages ?? [];
+}
+
+export interface PublishedEvent {
+  eventId: string;
+  eventType: string;
+  aggregateId: string;
+  correlationId: string;
+  data: Record<string, unknown>;
+  groupId: string | undefined;
+}
+
+/** Consumes what is in the events queue right now, in arrival order. */
+export async function takeEvents(queues: TestQueues): Promise<PublishedEvent[]> {
+  const taken: PublishedEvent[] = [];
+  for (;;) {
+    const { Messages } = await queues.client.send(
+      new ReceiveMessageCommand({
+        QueueUrl: queues.eventsUrl,
+        MaxNumberOfMessages: 10,
+        VisibilityTimeout: 30,
+        MessageSystemAttributeNames: ["MessageGroupId"],
+      }),
+    );
+    if (!Messages?.length) return taken;
+    for (const message of Messages) {
+      taken.push({ ...JSON.parse(message.Body as string), groupId: message.Attributes?.MessageGroupId });
+      await queues.client.send(new DeleteMessageCommand({ QueueUrl: queues.eventsUrl, ReceiptHandle: message.ReceiptHandle }));
+    }
+  }
 }
 
 export async function eventually<T>(

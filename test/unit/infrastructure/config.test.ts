@@ -42,6 +42,26 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...validEnv, ROLES: "api,consumerr" })).toThrow("consumerr");
   });
 
+  test("has the worker defaults: base 1s, capped at 60s", () => {
+    const backoff = { baseMs: 1000, maxMs: 60_000 };
+    expect(loadConfig(validEnv).outbox).toEqual({
+      pollIntervalMs: 500,
+      backoff,
+      eventsQueueName: "wagering-events.fifo",
+    });
+    expect(loadConfig(validEnv).pending).toEqual({ pollIntervalMs: 500, backoff });
+  });
+
+  test("reads each worker's backoff separately", () => {
+    const config = loadConfig({ ...validEnv, PENDING_BACKOFF_BASE_MS: "20", PENDING_BACKOFF_MAX_MS: "50" });
+    expect(config.pending.backoff).toEqual({ baseMs: 20, maxMs: 50 });
+    expect(config.outbox.backoff.baseMs).toBe(1000);
+  });
+
+  test("rejects an invalid backoff", () => {
+    expect(() => loadConfig({ ...validEnv, OUTBOX_BACKOFF_BASE_MS: "0" })).toThrow("OUTBOX_BACKOFF_BASE_MS");
+  });
+
   test("has the SQS consumer defaults", () => {
     expect(loadConfig(validEnv).sqs).toMatchObject({
       dlqName: "wager-transactions-dlq.fifo",

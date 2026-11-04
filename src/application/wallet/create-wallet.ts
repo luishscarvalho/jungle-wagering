@@ -1,9 +1,9 @@
 import { WagerTransactionProcessed, WalletBalanceChanged } from "../../domain/events/events";
 import { OutboxMessage } from "../../domain/messaging/outbox-message";
 import { FailureCode } from "../../domain/shared/failure-code";
-import { WagerTransaction } from "../../domain/transaction/wager-transaction";
+import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from "../../domain/transaction/wager-transaction";
 import { Wallet } from "../../domain/wallet/wallet";
-import { type Clock, DuplicateWalletError, type IdGenerator, type UnitOfWork } from "../ports";
+import { type Clock, DuplicateWalletError, type IdGenerator, type Metrics, type UnitOfWork } from "../ports";
 import { RefusedError } from "../refused-error";
 import { parseMoney, parseObject, parseUuid } from "../validation";
 import { walletView } from "../views";
@@ -13,6 +13,7 @@ export class CreateWallet {
     private readonly unitOfWork: UnitOfWork,
     private readonly ids: IdGenerator,
     private readonly clock: Clock,
+    private readonly metrics: Metrics,
   ) {}
 
   /** @throws RefusedError */
@@ -42,6 +43,9 @@ export class CreateWallet {
         throw new RefusedError(FailureCode.WalletAlreadyExists, "Player already has a wallet in this currency");
       }
       throw error;
+    }
+    if (initialBalance.isPositive()) {
+      this.metrics.transactionRecorded(WagerTransactionStatus.Processed, WagerTransactionKind.Opening);
     }
     return walletView(wallet);
   }

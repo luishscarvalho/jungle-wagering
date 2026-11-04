@@ -4,6 +4,8 @@ import type { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { randomUUIDv7, type SQL } from "bun";
 import { AppModule } from "../../src/app.module";
+import type { Metrics } from "../../src/application/ports";
+import { DEFAULT_BACKOFF } from "../../src/domain/shared/backoff";
 import { APP_CONFIG, type AppConfig, type Role } from "../../src/infrastructure/config";
 
 export interface TestApp {
@@ -11,10 +13,42 @@ export interface TestApp {
   url: string;
 }
 
+export const noopMetrics: Metrics = {
+  transactionRecorded: () => {},
+  refused: () => {},
+  duplicateDetected: () => {},
+  retryScheduled: () => {},
+  deadLettered: () => {},
+  lockConflict: () => {},
+  processingObserved: () => {},
+  reconciliationDivergence: () => {},
+};
+
+/** Reads one sample from GET /metrics, 0 when the series does not exist yet. Labels are matched exactly, in any order. */
+export async function metricValue(baseUrl: string, name: string, labels: Record<string, string> = {}): Promise<number> {
+  const text = await (await fetch(`${baseUrl}/metrics`)).text();
+  const wanted = Object.entries(labels)
+    .map(([key, value]) => `${key}="${value}"`)
+    .sort()
+    .join(",");
+  for (const line of text.split("\n")) {
+    const match = /^([a-zA-Z_:][\w:]*)(?:\{(.*)\})? (\S+)$/.exec(line);
+    if (!match || match[1] !== name) continue;
+    const found = (match[2] ?? "").split(",").filter(Boolean).sort().join(",");
+    if (found === wanted) return Number(match[3]);
+  }
+  return 0;
+}
+
 /** The real AppModule on a random port. Each call is one instance, with its own connection pool. */
 export async function startTestApp(
   databaseUrl: string,
-  options: { roles?: Role[]; sqs?: Partial<AppConfig["sqs"]> } = {},
+  options: {
+    roles?: Role[];
+    sqs?: Partial<AppConfig["sqs"]>;
+    outbox?: Partial<AppConfig["outbox"]>;
+    pending?: Partial<AppConfig["pending"]>;
+  } = {},
 ): Promise<TestApp> {
   const roles = options.roles ?? ["api"];
   const config: AppConfig = {
@@ -31,6 +65,8 @@ export async function startTestApp(
       shutdownGraceMs: 10_000,
       ...options.sqs,
     },
+    outbox: { pollIntervalMs: 50, backoff: DEFAULT_BACKOFF, eventsQueueName: "wagering-events.fifo", ...options.outbox },
+    pending: { pollIntervalMs: 50, backoff: DEFAULT_BACKOFF, ...options.pending },
   };
   const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoles(roles)] })
     .overrideProvider(APP_CONFIG)

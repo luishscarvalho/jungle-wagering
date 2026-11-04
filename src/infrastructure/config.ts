@@ -1,4 +1,5 @@
 import { Global, Module } from "@nestjs/common";
+import { type BackoffPolicy, DEFAULT_BACKOFF } from "../domain/shared/backoff";
 import { DEFAULT_DB_POOL_MAX } from "./db/create-orm-config";
 
 export const APP_CONFIG = Symbol("APP_CONFIG");
@@ -19,6 +20,13 @@ export interface AppConfig {
     visibilityTimeoutSeconds: number;
     shutdownGraceMs: number;
   };
+  outbox: WorkerConfig & { eventsQueueName: string };
+  pending: WorkerConfig;
+}
+
+export interface WorkerConfig {
+  pollIntervalMs: number;
+  backoff: BackoffPolicy;
 }
 
 function parseRoles(value: string | undefined): Role[] {
@@ -42,6 +50,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     return value;
   };
 
+  const worker = (prefix: string): WorkerConfig => ({
+    pollIntervalMs: positiveInteger(`${prefix}_POLL_INTERVAL_MS`, 500),
+    backoff: {
+      baseMs: positiveInteger(`${prefix}_BACKOFF_BASE_MS`, DEFAULT_BACKOFF.baseMs),
+      maxMs: positiveInteger(`${prefix}_BACKOFF_MAX_MS`, DEFAULT_BACKOFF.maxMs),
+    },
+  });
+
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid PORT: ${env.PORT}`);
@@ -60,6 +76,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       visibilityTimeoutSeconds: positiveInteger("SQS_VISIBILITY_TIMEOUT_S", 60),
       shutdownGraceMs: positiveInteger("SQS_SHUTDOWN_GRACE_MS", 10_000),
     },
+    outbox: { ...worker("OUTBOX"), eventsQueueName: env.SQS_EVENTS_QUEUE_NAME ?? "wagering-events.fifo" },
+    pending: worker("PENDING"),
   };
 }
 

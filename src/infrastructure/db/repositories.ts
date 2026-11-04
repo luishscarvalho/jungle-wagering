@@ -3,6 +3,7 @@ import type { EntityManager } from "@mikro-orm/postgresql";
 import {
   DuplicateTransactionError,
   DuplicateWalletError,
+  type DuePendingReference,
   type InboxRepository,
   type LedgerRepository,
   type OutboxRepository,
@@ -23,6 +24,7 @@ import type { Wallet } from "../../domain/wallet/wallet";
 import {
   inboxMessageFromRecord,
   inboxMessageToRecord,
+  outboxMessageFromRecord,
   ledgerEntryFromRecord,
   ledgerEntryToRecord,
   moneyFromColumn,
@@ -46,6 +48,10 @@ const TRANSACTION_DUPLICATE_CONSTRAINTS = [
   "wager_transactions_idempotency_key_unique",
   "wager_transactions_provider_external_unique",
 ];
+
+function uuidArray(ids: string[]): string {
+  return `{${ids.join(",")}}`;
+}
 
 function violatedUniqueConstraint(error: unknown): string | undefined {
   if (!(error instanceof UniqueConstraintViolationException)) return undefined;
@@ -124,6 +130,56 @@ class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
       throw error;
     }
   }
+
+  async update(transaction: WagerTransaction): Promise<void> {
+    const record = transactionToRecord(transaction);
+    await this.em.nativeUpdate(
+      WagerTransactionSchema,
+      { id: transaction.id },
+      {
+        status: record.status,
+        referenceTransactionId: record.referenceTransactionId,
+        failureCode: record.failureCode,
+        balanceAfter: record.balanceAfter,
+        attempts: record.attempts,
+        nextAttemptAt: record.nextAttemptAt,
+        processedAt: record.processedAt,
+      },
+    );
+  }
+
+  async findDuePendingReferences(limit: number): Promise<DuePendingReference[]> {
+    const rows = await this.em.execute<{ id: string; wallet_id: string }[]>(
+      `SELECT id, wallet_id FROM wager_transactions
+        WHERE status = 'PENDING_REFERENCE' AND next_attempt_at <= now()
+        ORDER BY next_attempt_at, id
+        LIMIT ?`,
+      [limit],
+    );
+    return rows.map((row) => ({ id: row.id, walletId: row.wallet_id }));
+  }
+
+  async lockIfDuePendingReference(id: string): Promise<WagerTransaction | undefined> {
+    const rows = await this.em.execute<{ id: string }[]>(
+      `SELECT id FROM wager_transactions
+        WHERE id = ? AND status = 'PENDING_REFERENCE' AND next_attempt_at <= now()
+        FOR UPDATE`,
+      [id],
+    );
+    return rows.length > 0 ? this.findById(id) : undefined;
+  }
+
+  async wakeWaitingFor(reference: { providerId: string; externalTransactionId: string; walletId: string }): Promise<void> {
+    await this.em.execute(
+      `UPDATE wager_transactions SET next_attempt_at = now()
+        WHERE status = 'PENDING_REFERENCE'
+          AND provider_id = ?
+          AND reference_external_transaction_id = ?
+          AND wallet_id = ?
+          AND next_attempt_at > now()`,
+      [reference.providerId, reference.externalTransactionId, reference.walletId],
+    );
+  }
 }
 
 interface ReconciliationRow {
@@ -183,6 +239,66 @@ class MikroOrmOutboxRepository implements OutboxRepository {
 
   async insert(message: OutboxMessage): Promise<void> {
     await this.em.insert(OutboxMessageSchema, outboxMessageToRecord(message));
+  }
+
+  async lockDueBatch(limit: number): Promise<OutboxMessage[]> {
+    const heads = await this.em.execute<{ id: string; aggregate_id: string }[]>(
+      `SELECT m.id, m.aggregate_id FROM outbox_messages m
+        WHERE m.published_at IS NULL AND m.next_attempt_at <= now()
+          AND NOT EXISTS (
+            SELECT 1 FROM outbox_messages earlier
+             WHERE earlier.aggregate_id = m.aggregate_id
+               AND earlier.published_at IS NULL
+               AND (earlier.occurred_at, earlier.id) < (m.occurred_at, m.id)
+          )
+        ORDER BY m.occurred_at, m.id
+        FOR UPDATE OF m SKIP LOCKED
+        LIMIT ?`,
+      [limit],
+    );
+    if (heads.length === 0) return [];
+
+    // Holding the head makes the rest of its aggregate exclusive to this publisher,
+    // since no other one can select a message that has an older one unpublished.
+    const room = limit - heads.length;
+    const followers =
+      room === 0
+        ? []
+        : await this.em.execute<{ id: string }[]>(
+            `SELECT id FROM outbox_messages
+              WHERE aggregate_id = ANY(?::uuid[])
+                AND id <> ALL(?::uuid[])
+                AND published_at IS NULL AND next_attempt_at <= now()
+              ORDER BY occurred_at, id
+              FOR UPDATE SKIP LOCKED
+              LIMIT ?`,
+            [uuidArray(heads.map((head) => head.aggregate_id)), uuidArray(heads.map((head) => head.id)), room],
+          );
+
+    const ids = [...heads, ...followers].map((row) => row.id);
+    const records = await this.em.find(
+      OutboxMessageSchema,
+      { id: { $in: ids } },
+      { orderBy: { occurredAt: "asc", id: "asc" } },
+    );
+    return records.map(outboxMessageFromRecord);
+  }
+
+  async update(message: OutboxMessage): Promise<void> {
+    await this.em.nativeUpdate(
+      OutboxMessageSchema,
+      { id: message.id },
+      { attempts: message.attempts, nextAttemptAt: message.nextAttemptAt, publishedAt: message.publishedAt ?? null },
+    );
+  }
+
+  async oldestPendingAgeSeconds(): Promise<number> {
+    const [row] = await this.em.execute<{ age: string | number }[]>(
+      `SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(occurred_at)), 0)::float8 AS age
+         FROM outbox_messages
+        WHERE published_at IS NULL`,
+    );
+    return Math.max(0, Number(row?.age ?? 0));
   }
 }
 

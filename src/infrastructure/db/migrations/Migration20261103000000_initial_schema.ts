@@ -28,7 +28,7 @@ export class Migration20261103000000_initial_schema extends Migration {
     //
     // wallet_player_currency_fk means a divergent currency or an unknown wallet
     // cannot be stored, not even as REJECTED. By decision, those are refused
-    // before persisting (422 with a failureCode).
+    // before persisting (400 or 404 with a failureCode).
     //
     // reference_fk only applies once reference_transaction_id is set. A reversal
     // rejected for pointing at another wallet or round stays auditable by keeping

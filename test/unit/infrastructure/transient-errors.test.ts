@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DeadlockException, DriverException } from "@mikro-orm/core";
-import { isTransientInfrastructureError } from "../../../src/infrastructure/transient-errors";
+import { DuplicateTransactionError } from "../../../src/application/ports";
+import { isTransientInfrastructureError, lockConflictOf } from "../../../src/infrastructure/transient-errors";
 
 function withCode(code: string, message = "failed"): Error {
   return Object.assign(new Error(message), { code });
@@ -57,5 +58,21 @@ describe("isTransientInfrastructureError", () => {
 
   test.each([[new Error("boom")], ["text"], [undefined], [null]])("%p is not transient", (value) => {
     expect(isTransientInfrastructureError(value)).toBe(false);
+  });
+});
+
+describe("lockConflictOf", () => {
+  test("names the contention, also when the driver error is wrapped", () => {
+    const code = (value: string) => Object.assign(new Error("driver"), { code: value });
+    expect(lockConflictOf(code("55P03"))).toBe("lock_timeout");
+    expect(lockConflictOf(code("40P01"))).toBe("deadlock");
+    expect(lockConflictOf(new Error("wrapped", { cause: code("55P03") }))).toBe("lock_timeout");
+    expect(lockConflictOf(new DuplicateTransactionError())).toBe("unique_race");
+  });
+
+  test("anything else is no conflict", () => {
+    expect(lockConflictOf(new Error("boom"))).toBeUndefined();
+    expect(lockConflictOf(Object.assign(new Error("x"), { code: "23505" }))).toBeUndefined();
+    expect(lockConflictOf("text")).toBeUndefined();
   });
 });

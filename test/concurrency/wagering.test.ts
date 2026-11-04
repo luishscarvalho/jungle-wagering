@@ -12,6 +12,7 @@ import {
   createWallet,
   expectBalanceMatchesLedger,
   type HttpResult,
+  noopMetrics,
   request,
   startTestApp,
   submit,
@@ -172,7 +173,7 @@ describe("the idempotency lookup happens under the lock", () => {
           return real.transaction(work);
         },
       };
-      const useCase = new ProcessWagerTransaction(counting, app.get(ID_GENERATOR), app.get(CLOCK));
+      const useCase = new ProcessWagerTransaction(counting, app.get(ID_GENERATOR), app.get(CLOCK), noopMetrics);
 
       const results = await raceOnWallet(wallet.id, 2, () =>
         [1, 2].map(() => useCase.execute({ idempotencyKey: key, payload: body })),

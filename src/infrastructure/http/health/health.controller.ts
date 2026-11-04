@@ -1,5 +1,6 @@
 import { Controller, Get, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { FailureCode } from "../../../domain/shared/failure-code";
+import { describeError } from "../../transient-errors";
 import { Public } from "../auth.guard";
 import { PostgresHealthCheck, SqsHealthCheck } from "./health.checks";
 
@@ -51,7 +52,7 @@ export class HealthController {
       await Promise.race([check(), timeout]);
       return "up";
     } catch (error) {
-      this.logger.warn(`${name} readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.logger.warn({ message: "Readiness check failed", check: name, ...describeError(error) });
       return "down";
     } finally {
       clearTimeout(timer);

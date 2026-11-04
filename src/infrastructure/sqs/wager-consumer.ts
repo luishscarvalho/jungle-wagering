@@ -7,11 +7,12 @@ import {
   SendMessageCommand,
   type SQSClient,
 } from "@aws-sdk/client-sqs";
-import type { AppLogger } from "../../application/ports";
+import type { AppLogger, Metrics } from "../../application/ports";
 import type { ProcessWagerResult, ProcessWagerTransaction } from "../../application/wager/process-wager-transaction";
 import { backoffDelayMs } from "../../domain/shared/backoff";
 import { FailureCode } from "../../domain/shared/failure-code";
-import { isTransientInfrastructureError } from "../transient-errors";
+import { crashIfRequested } from "../test-hooks";
+import { describeError, isTransientInfrastructureError } from "../transient-errors";
 import { parseWagerMessage, type WagerMessage } from "./wager-message";
 
 export const WAGER_CONSUMER_NAME = "wager-processor";
@@ -49,13 +50,6 @@ function groupOf(message: Message): string {
   return message.Attributes?.MessageGroupId ?? message.MessageId ?? "";
 }
 
-/** Error messages from the driver can quote the SQL parameters, so only the name and code are logged. */
-function describeError(error: unknown): Record<string, unknown> {
-  if (!(error instanceof Error)) return { errorName: typeof error };
-  const code = (error as { code?: unknown }).code;
-  return { errorName: error.name, ...(typeof code === "string" ? { errorCode: code } : {}) };
-}
-
 function logContext(delivery: Delivery, parsed?: WagerMessage): Record<string, unknown> {
   const text = (value: unknown) => (typeof value === "string" ? value : undefined);
   return {
@@ -80,6 +74,7 @@ export class WagerConsumer {
     private readonly client: SQSClient,
     private readonly processWager: ProcessWagerTransaction,
     private readonly logger: AppLogger,
+    private readonly metrics: Pick<Metrics, "retryScheduled" | "deadLettered">,
     private readonly options: WagerConsumerOptions,
   ) {}
 
@@ -219,6 +214,7 @@ export class WagerConsumer {
       return this.deadLetter(delivery, FailureCode.ProcessingFailed, parsed);
     }
 
+    crashIfRequested("TEST_CRASH_AFTER_COMMIT");
     return this.settle(delivery, parsed, result);
   }
 
@@ -295,11 +291,13 @@ export class WagerConsumer {
       return this.retrySettlement(delivery);
     }
 
+    this.metrics.deadLettered(reason);
     this.logger.error("Message sent to the DLQ", context);
     return this.ack(delivery, parsed);
   }
 
   private retrySettlement(delivery: Delivery): Settlement {
+    this.metrics.retryScheduled("sqs");
     return { retryAfterSeconds: Math.ceil(backoffDelayMs(receiveCountOf(delivery.message)) / 1000) };
   }
 

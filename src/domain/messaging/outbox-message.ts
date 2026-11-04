@@ -1,5 +1,5 @@
 import type { IntegrationEvent } from "../events/integration-event";
-import { nextAttemptAfter } from "../shared/backoff";
+import { type BackoffPolicy, nextAttemptAfter } from "../shared/backoff";
 import { InvalidMessageStateError } from "./messaging.errors";
 
 export interface OutboxMessageState {
@@ -77,10 +77,10 @@ export class OutboxMessage {
   }
 
   /** No attempt limit: a committed event must never be lost. */
-  scheduleRetry(now: Date): void {
+  scheduleRetry(now: Date, backoff?: BackoffPolicy): void {
     this.assertPending();
     this._attempts += 1;
-    this._nextAttemptAt = nextAttemptAfter(now, this._attempts);
+    this._nextAttemptAt = nextAttemptAfter(now, this._attempts, backoff);
   }
 
   private assertPending(): void {

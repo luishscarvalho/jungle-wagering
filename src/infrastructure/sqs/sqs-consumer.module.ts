@@ -5,7 +5,7 @@ import {
   Module,
   type OnApplicationBootstrap,
 } from "@nestjs/common";
-import { APP_LOGGER, type AppLogger } from "../../application/ports";
+import { APP_LOGGER, type AppLogger, METRICS, type Metrics } from "../../application/ports";
 import { ProcessWagerTransaction } from "../../application/wager/process-wager-transaction";
 import { APP_CONFIG, type AppConfig } from "../config";
 import { WagerConsumer } from "./wager-consumer";
@@ -14,14 +14,15 @@ import { WagerConsumer } from "./wager-consumer";
   providers: [
     {
       provide: WagerConsumer,
-      useFactory: (config: AppConfig, processWager: ProcessWagerTransaction, logger: AppLogger) =>
+      useFactory: (config: AppConfig, processWager: ProcessWagerTransaction, logger: AppLogger, metrics: Metrics) =>
         new WagerConsumer(
           new SQSClient({ region: config.sqs.region, endpoint: config.sqs.endpoint }),
           processWager,
           logger,
+          metrics,
           config.sqs,
         ),
-      inject: [APP_CONFIG, ProcessWagerTransaction, APP_LOGGER],
+      inject: [APP_CONFIG, ProcessWagerTransaction, APP_LOGGER, METRICS],
     },
   ],
   exports: [WagerConsumer],

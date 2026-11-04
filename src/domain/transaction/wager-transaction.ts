@@ -1,7 +1,7 @@
 import { LedgerDirection } from "../ledger/wallet-ledger-entry";
 import type { Money } from "../money/money";
 import { CurrencyMismatchError } from "../money/money.errors";
-import { nextAttemptAfter } from "../shared/backoff";
+import { type BackoffPolicy, nextAttemptAfter } from "../shared/backoff";
 import { FailureCategory, type FailureCode, failureCategoryOf } from "../shared/failure-code";
 import type { Wallet } from "../wallet/wallet";
 import { computePayloadHash } from "./payload-hash";
@@ -229,7 +229,7 @@ export class WagerTransaction {
    * First call schedules the first retry. Each later call is a reschedule and
    * increments attempts. The last retry rejects instead (see isLastReferenceAttempt).
    */
-  markPendingReference(now: Date): void {
+  markPendingReference(now: Date, backoff?: BackoffPolicy): void {
     this.assertNotTerminal();
     if (!this.referenceExternalTransactionId) {
       throw new InvalidTransactionStateError("Transaction has no reference to wait for");
@@ -241,7 +241,7 @@ export class WagerTransaction {
       this._attempts += 1;
     }
     this._status = WagerTransactionStatus.PendingReference;
-    this._nextAttemptAt = nextAttemptAfter(now, this._attempts + 1);
+    this._nextAttemptAt = nextAttemptAfter(now, this._attempts + 1, backoff);
   }
 
   /** Stores balanceAfter because REJECTED has no ledger entry and replays must return it. */

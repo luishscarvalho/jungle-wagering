@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { ChangeMessageVisibilityCommand, DeleteMessageCommand, SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { randomUUIDv7, type SQL } from "bun";
-import type { AppLogger } from "../../../src/application/ports";
+import { type AppLogger, METRICS } from "../../../src/application/ports";
 import { ProcessWagerTransaction } from "../../../src/application/wager/process-wager-transaction";
 import { WAGER_CONSUMER_NAME, WagerConsumer } from "../../../src/infrastructure/sqs/wager-consumer";
 import {
@@ -80,6 +80,7 @@ function startConsumer(queues: TestQueues, options: ConsumerOptions = {}) {
     options.client ?? createSqsClient(),
     (options.useCase ?? testApp.app.get(ProcessWagerTransaction)) as ProcessWagerTransaction,
     logger,
+    testApp.app.get(METRICS),
     {
       queueName: queues.queueName,
       dlqName: queues.dlqName,

@@ -1,21 +1,24 @@
-import { WagerTransactionPendingReference, WagerTransactionProcessed, WagerTransactionRejected, WalletBalanceChanged } from "../../domain/events/events";
-import type { EventContext, IntegrationEvent } from "../../domain/events/integration-event";
-import { LedgerDirection, type WalletLedgerEntry } from "../../domain/ledger/wallet-ledger-entry";
 import { InboxMessage, type ReceiveInboxProps } from "../../domain/messaging/inbox-message";
-import { OutboxMessage } from "../../domain/messaging/outbox-message";
 import type { MoneyProps } from "../../domain/money/money";
-import { evaluateWagerPolicy } from "../../domain/policy/wager-policy";
+import type { BackoffPolicy } from "../../domain/shared/backoff";
 import { DomainError } from "../../domain/shared/domain-error";
-import { FailureCategory, FailureCode, failureCategoryOf } from "../../domain/shared/failure-code";
+import { FailureCode } from "../../domain/shared/failure-code";
 import {
   WagerTransaction,
   WagerTransactionKind,
   type WagerTransactionStatus,
 } from "../../domain/transaction/wager-transaction";
-import type { Wallet } from "../../domain/wallet/wallet";
-import { type Clock, DuplicateTransactionError, type IdGenerator, type Repositories, type UnitOfWork } from "../ports";
+import {
+  type Clock,
+  DuplicateTransactionError,
+  type IdGenerator,
+  type Metrics,
+  type Repositories,
+  type UnitOfWork,
+} from "../ports";
 import { RefusedError } from "../refused-error";
 import { parseMoney, parseObject, parseText, parseUuid } from "../validation";
+import { WagerSettlement } from "./wager-settlement";
 
 export interface ProcessWagerInput {
   idempotencyKey: unknown;
@@ -36,7 +39,7 @@ export interface WagerResultView {
 }
 
 export type ProcessWagerResult =
-  | { type: "result"; view: WagerResultView }
+  | { type: "result"; view: WagerResultView; kind: WagerTransactionKind }
   /**
    * Refused before writing a transaction. An inbox row, if any, still commits, except
    * for INVALID_PAYLOAD: the consumer dead-letters those, and a row would make a
@@ -64,6 +67,7 @@ function refused(failureCode: FailureCode, message: string): ProcessWagerResult 
 function resultOf(transaction: WagerTransaction, idempotentReplay: boolean): ProcessWagerResult {
   return {
     type: "result",
+    kind: transaction.kind,
     view: {
       transactionId: transaction.id,
       status: transaction.status,
@@ -82,13 +86,42 @@ function answerExisting(existing: WagerTransaction, payloadHash: string): Proces
 
 /** The single path for a wager operation, shared by the HTTP and SQS entries. */
 export class ProcessWagerTransaction {
+  private readonly settlement: WagerSettlement;
+
   constructor(
     private readonly unitOfWork: UnitOfWork,
     private readonly ids: IdGenerator,
     private readonly clock: Clock,
-  ) {}
+    private readonly metrics: Metrics,
+    referenceBackoff?: BackoffPolicy,
+  ) {
+    this.settlement = new WagerSettlement(ids, clock, referenceBackoff);
+  }
 
   async execute(input: ProcessWagerInput): Promise<ProcessWagerResult> {
+    const startedAt = performance.now();
+    try {
+      const result = await this.process(input);
+      this.record(input, result);
+      return result;
+    } finally {
+      this.metrics.processingObserved(input.inbox ? "sqs" : "http", (performance.now() - startedAt) / 1000);
+    }
+  }
+
+  /** Runs once the outcome has committed. A message-conflict is counted by the consumer, which dead-letters it. */
+  private record(input: ProcessWagerInput, result: ProcessWagerResult): void {
+    if (result.type === "refused") {
+      this.metrics.refused(result.failureCode);
+    } else if (result.type === "duplicate-message") {
+      this.metrics.duplicateDetected("inbox");
+    } else if (result.type === "result") {
+      if (result.view.idempotentReplay) this.metrics.duplicateDetected(input.inbox ? "sqs_replay" : "http_replay");
+      else this.metrics.transactionRecorded(result.view.status, result.kind);
+    }
+  }
+
+  private async process(input: ProcessWagerInput): Promise<ProcessWagerResult> {
     let transaction: WagerTransaction;
     try {
       transaction = this.buildTransaction(input);
@@ -160,70 +193,17 @@ export class ProcessWagerTransaction {
     const existing = await repositories.transactions.findByIdempotencyKey(transaction.idempotencyKey);
     if (existing) return answerExisting(existing, transaction.payloadHash);
 
-    const reference = transaction.referenceExternalTransactionId
-      ? await repositories.transactions.findByProviderAndExternalId(
-          transaction.providerId,
-          transaction.referenceExternalTransactionId,
-        )
-      : undefined;
-    const outcome = evaluateWagerPolicy({
+    const settled = await this.settlement.settle({
       transaction,
       wallet,
-      reference,
-      referenceAlreadyReversed: reference ? await repositories.transactions.isReversed(reference.id) : false,
+      repositories,
+      correlationId: input.correlationId,
+      causationId: input.causationId,
+      save: () => repositories.transactions.insert(transaction),
     });
-
-    const now = this.clock.now();
-    const events: IntegrationEvent<unknown>[] = [];
-    let entry: WalletLedgerEntry | undefined;
-
-    if (outcome.type === "process") {
-      if (outcome.direction) entry = this.moveBalance(wallet, transaction, outcome.direction, now);
-      transaction.markProcessed(outcome.referenceTransactionId, now, wallet.balance);
-      events.push(WagerTransactionProcessed.from(transaction, this.eventContext(input, transaction, now)));
-      if (entry) events.push(WalletBalanceChanged.from(wallet, entry, this.eventContext(input, transaction, now)));
-    } else if (outcome.type === "await-reference") {
-      transaction.markPendingReference(now);
-      events.push(WagerTransactionPendingReference.from(transaction, this.eventContext(input, transaction, now)));
-    } else {
-      if (failureCategoryOf(outcome.failureCode) !== FailureCategory.Business) {
-        return refused(outcome.failureCode, "Operation refused");
-      }
-      transaction.reject(outcome.failureCode, wallet.balance);
-      events.push(WagerTransactionRejected.from(transaction, this.eventContext(input, transaction, now)));
-    }
-
-    // In this order for the foreign keys: the ledger points at the transaction.
-    await repositories.transactions.insert(transaction);
-    if (entry) {
-      await repositories.ledger.insert(entry);
-      await repositories.wallets.update(wallet);
-    }
-    for (const event of events) await repositories.outbox.insert(OutboxMessage.enqueue(event));
+    if (settled.type === "refused") return refused(settled.failureCode, "Operation refused");
 
     return resultOf(transaction, false);
-  }
-
-  private moveBalance(
-    wallet: Wallet,
-    transaction: WagerTransaction,
-    direction: LedgerDirection,
-    at: Date,
-  ): WalletLedgerEntry {
-    // The id is generated under the wallet lock, so ids of one wallet follow commit
-    // order (up to clock differences between instances) and a cursor reader does not
-    // miss an entry committed behind its position.
-    const movement = { entryId: this.ids.next(), transactionId: transaction.id, money: transaction.money, at };
-    return direction === LedgerDirection.Debit ? wallet.debit(movement) : wallet.credit(movement);
-  }
-
-  private eventContext(input: ProcessWagerInput, transaction: WagerTransaction, occurredAt: Date): EventContext {
-    return {
-      eventId: this.ids.next(),
-      correlationId: input.correlationId ?? transaction.idempotencyKey,
-      ...(input.causationId ? { causationId: input.causationId } : {}),
-      occurredAt,
-    };
   }
 
   /**

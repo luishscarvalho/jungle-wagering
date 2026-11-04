@@ -15,6 +15,7 @@ import { PostgresHealthCheck } from "../../../src/infrastructure/http/health/hea
 import {
   createWallet,
   expectBalanceMatchesLedger,
+  noopMetrics,
   startTestApp,
   submit,
   type TestApp,
@@ -52,7 +53,7 @@ function useCaseWith(override: (repositories: Repositories) => Partial<Repositor
         work(calls++ === 0 ? { ...repositories, ...override(repositories) } : repositories),
       ),
   };
-  return new ProcessWagerTransaction(unitOfWork, testApp.app.get(ID_GENERATOR), testApp.app.get(CLOCK));
+  return new ProcessWagerTransaction(unitOfWork, testApp.app.get(ID_GENERATOR), testApp.app.get(CLOCK), noopMetrics);
 }
 
 const useCase = () => testApp.app.get(ProcessWagerTransaction);
@@ -78,7 +79,7 @@ describe("atomicity", () => {
   test.each([
     ["ledger", () => ({ ledger: { insert: failing } })],
     ["wallet update", (r: Repositories) => ({ wallets: { ...walletsOf(r), update: failing } })],
-    ["outbox", () => ({ outbox: { insert: failing } })],
+    ["outbox", (r: Repositories) => ({ outbox: Object.assign(Object.create(r.outbox), { insert: failing }) })],
   ] as [string, (r: Repositories) => Partial<Repositories>][])(
     "a failure writing the %s rolls everything back",
     async (_label, override) => {
@@ -343,12 +344,12 @@ describe("inbox", () => {
   test("a rollback also undoes the inbox row, so the message can be retried", async () => {
     const wallet = await createWallet(url);
     const message = inbox();
-    const failing = useCaseWith(() => ({
-      outbox: {
+    const failing = useCaseWith((repositories) => ({
+      outbox: Object.assign(Object.create(repositories.outbox), {
         insert: async () => {
           throw new Error("boom");
         },
-      },
+      }),
     }));
 
     await expect(
@@ -378,7 +379,7 @@ describe("ReconcileWallet", () => {
     const wallet = await createWallet(url, "100.00");
     await sql`UPDATE wallets SET balance = 90.00 WHERE id = ${wallet.id}`;
     const warnings: [string, Record<string, unknown>][] = [];
-    const reconcile = new ReconcileWallet(realUnitOfWork, { warn: (message, context) => warnings.push([message, context]) });
+    const reconcile = new ReconcileWallet(realUnitOfWork, { warn: (message, context) => warnings.push([message, context]) }, noopMetrics);
 
     const report = await reconcile.execute(wallet.id);
 
@@ -394,7 +395,7 @@ describe("ReconcileWallet", () => {
   test("does not log when consistent", async () => {
     const wallet = await createWallet(url, "100.00");
     const warnings: unknown[] = [];
-    const reconcile = new ReconcileWallet(realUnitOfWork, { warn: (message) => warnings.push(message) });
+    const reconcile = new ReconcileWallet(realUnitOfWork, { warn: (message) => warnings.push(message) }, noopMetrics);
 
     expect((await reconcile.execute(wallet.id)).consistent).toBe(true);
     expect(warnings).toEqual([]);
