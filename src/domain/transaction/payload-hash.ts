@@ -13,7 +13,7 @@ export interface PayloadHashFields {
   referenceExternalTransactionId?: string | null;
 }
 
-type JsonValue = string | number | boolean | null | undefined | readonly JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue = string | number | boolean | null | undefined | readonly JsonValue[] | { [key: string]: JsonValue };
 
 /** JSON with object keys sorted recursively, no whitespace, absent fields omitted. */
 export function canonicalJson(value: JsonValue): string {

@@ -4,7 +4,7 @@ import type { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { randomUUIDv7, type SQL } from "bun";
 import { AppModule } from "../../src/app.module";
-import { APP_CONFIG, type AppConfig } from "../../src/infrastructure/config";
+import { APP_CONFIG, type AppConfig, type Role } from "../../src/infrastructure/config";
 
 export interface TestApp {
   app: INestApplication;
@@ -12,13 +12,27 @@ export interface TestApp {
 }
 
 /** The real AppModule on a random port. Each call is one instance, with its own connection pool. */
-export async function startTestApp(databaseUrl: string): Promise<TestApp> {
+export async function startTestApp(
+  databaseUrl: string,
+  options: { roles?: Role[]; sqs?: Partial<AppConfig["sqs"]> } = {},
+): Promise<TestApp> {
+  const roles = options.roles ?? ["api"];
   const config: AppConfig = {
     port: 0,
     databaseUrl,
-    sqs: { region: "us-east-1", endpoint: "http://localhost:4566", queueName: "wager-transactions.fifo" },
+    databasePoolMax: 10,
+    roles,
+    sqs: {
+      region: "us-east-1",
+      endpoint: "http://localhost:4566",
+      queueName: "wager-transactions.fifo",
+      dlqName: "wager-transactions-dlq.fifo",
+      visibilityTimeoutSeconds: 60,
+      shutdownGraceMs: 10_000,
+      ...options.sqs,
+    },
   };
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoles(roles)] })
     .overrideProvider(APP_CONFIG)
     .useValue(config)
     .compile();

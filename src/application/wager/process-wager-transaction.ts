@@ -37,10 +37,16 @@ export interface WagerResultView {
 
 export type ProcessWagerResult =
   | { type: "result"; view: WagerResultView }
-  /** Refused before writing a transaction. An inbox row, if any, still commits. */
+  /**
+   * Refused before writing a transaction. An inbox row, if any, still commits, except
+   * for INVALID_PAYLOAD: the consumer dead-letters those, and a row would make a
+   * redelivery after a crash look processed, losing the message before it reached the DLQ.
+   */
   | { type: "refused"; failureCode: FailureCode; message: string }
-  /** The inbox already holds this message, so nothing was done. */
-  | { type: "duplicate-message" };
+  /** The inbox already holds this message with the same hash, so nothing was done. */
+  | { type: "duplicate-message" }
+  /** The inbox holds this message id with another hash, so nothing was done. */
+  | { type: "message-conflict" };
 
 const KINDS: Readonly<Record<string, WagerTransactionKind>> = {
   BET: WagerTransactionKind.Bet,
@@ -89,7 +95,9 @@ export class ProcessWagerTransaction {
     } catch (error) {
       if (error instanceof DomainError && error.failureCode) {
         const refusal = refused(error.failureCode, error.message);
-        return input.inbox ? this.recordRefusal(input, refusal) : refusal;
+        return input.inbox && error.failureCode !== FailureCode.InvalidPayload
+          ? this.recordRefusal(input, refusal)
+          : refusal;
       }
       throw error;
     }
@@ -104,7 +112,8 @@ export class ProcessWagerTransaction {
 
   private buildTransaction(input: ProcessWagerInput): WagerTransaction {
     const payload = parseObject(input.payload, "Payload");
-    const kind = KINDS[payload.kind as string];
+    // hasOwn: "constructor" and the like must not resolve through the prototype.
+    const kind = Object.hasOwn(KINDS, String(payload.kind)) ? KINDS[String(payload.kind)] : undefined;
     if (!kind) throw new RefusedError(FailureCode.InvalidPayload, "kind is not a known operation");
 
     const reference = payload.referenceExternalTransactionId ?? undefined;
@@ -130,7 +139,13 @@ export class ProcessWagerTransaction {
     transaction: WagerTransaction,
     repositories: Repositories,
   ): Promise<ProcessWagerResult> {
-    if (!(await this.recordInbox(input, repositories))) return { type: "duplicate-message" };
+    const inboxAnswer = await this.recordInbox(input, repositories);
+    if (inboxAnswer) return inboxAnswer;
+
+    // Before the lock, so a replay on a hot wallet does not queue, and reusing a key is
+    // a conflict wherever the new payload points, even at a wallet that does not exist.
+    const known = await repositories.transactions.findByIdempotencyKey(transaction.idempotencyKey);
+    if (known) return answerExisting(known, transaction.payloadHash);
 
     const wallet = await repositories.wallets.findByIdForUpdate(transaction.walletId);
     if (!wallet) return refused(FailureCode.WalletNotFound, "Wallet does not exist");
@@ -141,7 +156,7 @@ export class ProcessWagerTransaction {
       return refused(FailureCode.PlayerMismatch, "Player differs from the wallet's");
     }
 
-    // Only after the lock: a concurrent duplicate on this wallet has committed by now, so it is visible.
+    // The source of truth: a concurrent duplicate on this wallet has committed by now, so it is visible.
     const existing = await repositories.transactions.findByIdempotencyKey(transaction.idempotencyKey);
     if (existing) return answerExisting(existing, transaction.payloadHash);
 
@@ -218,7 +233,8 @@ export class ProcessWagerTransaction {
    */
   private answerAfterLostRace(input: ProcessWagerInput, transaction: WagerTransaction): Promise<ProcessWagerResult> {
     return this.unitOfWork.transaction(async (repositories) => {
-      if (!(await this.recordInbox(input, repositories))) return { type: "duplicate-message" };
+      const inboxAnswer = await this.recordInbox(input, repositories);
+      if (inboxAnswer) return inboxAnswer;
 
       const existing = await repositories.transactions.findByIdempotencyKey(transaction.idempotencyKey);
       if (existing) return answerExisting(existing, transaction.payloadHash);
@@ -230,17 +246,22 @@ export class ProcessWagerTransaction {
   }
 
   private recordRefusal(input: ProcessWagerInput, refusal: ProcessWagerResult): Promise<ProcessWagerResult> {
-    return this.unitOfWork.transaction(async (repositories) =>
-      (await this.recordInbox(input, repositories)) ? refusal : { type: "duplicate-message" },
-    );
+    return this.unitOfWork.transaction(async (repositories) => (await this.recordInbox(input, repositories)) ?? refusal);
   }
 
-  /** The message is recorded as processed right away, since it commits together with the outcome. */
-  private async recordInbox(input: ProcessWagerInput, repositories: Repositories): Promise<boolean> {
-    if (!input.inbox) return true;
+  /**
+   * The message is recorded as processed right away, since it commits together with the
+   * outcome. Returns the answer when the inbox already holds it, and undefined to go on.
+   */
+  private async recordInbox(input: ProcessWagerInput, repositories: Repositories): Promise<ProcessWagerResult | undefined> {
+    if (!input.inbox) return undefined;
     const now = this.clock.now();
     const message = InboxMessage.receive({ ...input.inbox, receivedAt: now });
     message.markProcessed(now);
-    return repositories.inbox.insertIfAbsent(message);
+    if (await repositories.inbox.insertIfAbsent(message)) return undefined;
+
+    const recorded = await repositories.inbox.find(message.consumerName, message.messageId);
+    if (!recorded) throw new Error("Inbox row vanished after a conflicting insert");
+    return recorded.matchesPayload(message.payloadHash) ? { type: "duplicate-message" } : { type: "message-conflict" };
   }
 }

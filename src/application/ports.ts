@@ -45,6 +45,7 @@ export interface OutboxRepository {
 export interface InboxRepository {
   /** False when this consumer already recorded the message. Waits for a concurrent insert to finish. */
   insertIfAbsent(message: InboxMessage): Promise<boolean>;
+  find(consumerName: string, messageId: string): Promise<InboxMessage | undefined>;
 }
 
 export interface Repositories {
@@ -71,7 +72,9 @@ export interface Clock {
 }
 
 export interface AppLogger {
+  info(message: string, context: Record<string, unknown>): void;
   warn(message: string, context: Record<string, unknown>): void;
+  error(message: string, context: Record<string, unknown>): void;
 }
 
 export const UNIT_OF_WORK = Symbol("UNIT_OF_WORK");

@@ -35,7 +35,7 @@ export class WageringController {
   ) {
     const result = await this.processWager.execute({ idempotencyKey, payload: body });
     if (result.type === "refused") throw new RefusedError(result.failureCode, result.message);
-    if (result.type === "duplicate-message") throw new Error("HTTP requests do not use the inbox");
+    if (result.type !== "result") throw new Error("HTTP requests do not use the inbox");
 
     response.status(httpStatusOfResult(result.view.status, result.view.failureCode));
     return result.view;

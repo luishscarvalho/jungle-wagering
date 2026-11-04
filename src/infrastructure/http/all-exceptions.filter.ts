@@ -3,7 +3,7 @@ import type { Response } from "express";
 import { DomainError } from "../../domain/shared/domain-error";
 import { FailureCode } from "../../domain/shared/failure-code";
 import { httpStatusOf } from "./failure-status";
-import { isTransientInfrastructureError } from "./transient-errors";
+import { isTransientInfrastructureError } from "../transient-errors";
 
 function codeForHttpStatus(status: number): FailureCode {
   if (status === HttpStatus.NOT_FOUND) return FailureCode.ResourceNotFound;

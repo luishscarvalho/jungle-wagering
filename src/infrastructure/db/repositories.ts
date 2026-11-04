@@ -21,6 +21,7 @@ import {
 } from "../../domain/transaction/wager-transaction";
 import type { Wallet } from "../../domain/wallet/wallet";
 import {
+  inboxMessageFromRecord,
   inboxMessageToRecord,
   ledgerEntryFromRecord,
   ledgerEntryToRecord,
@@ -196,6 +197,11 @@ class MikroOrmInboxRepository implements InboxRepository {
       .ignore()
       .execute("run");
     return result.affectedRows > 0;
+  }
+
+  async find(consumerName: string, messageId: string): Promise<InboxMessage | undefined> {
+    const record = await this.em.findOne(InboxMessageSchema, { consumerName, messageId });
+    return record ? inboxMessageFromRecord(record) : undefined;
   }
 }
 

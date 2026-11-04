@@ -6,7 +6,7 @@ import { parseUuid } from "../validation";
 export class ReconcileWallet {
   constructor(
     private readonly unitOfWork: UnitOfWork,
-    private readonly logger: AppLogger,
+    private readonly logger: Pick<AppLogger, "warn">,
   ) {}
 
   /** Only reports: a divergence is logged and flagged, never corrected. */

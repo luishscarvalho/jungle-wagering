@@ -20,4 +20,33 @@ describe("loadConfig", () => {
   test("rejects an invalid PORT", () => {
     expect(() => loadConfig({ ...validEnv, PORT: "abc" })).toThrow("PORT");
   });
+
+  test("defaults DB_POOL_MAX to 10 and reads it from the environment", () => {
+    expect(loadConfig(validEnv).databasePoolMax).toBe(10);
+    expect(loadConfig({ ...validEnv, DB_POOL_MAX: "25" }).databasePoolMax).toBe(25);
+  });
+
+  test.each(["0", "-1", "1.5", "abc"])("rejects DB_POOL_MAX=%s", (value) => {
+    expect(() => loadConfig({ ...validEnv, DB_POOL_MAX: value })).toThrow("DB_POOL_MAX");
+  });
+
+  test.each([undefined, "", "  "])("ROLES=%j means every role", (value) => {
+    expect(loadConfig({ ...validEnv, ROLES: value }).roles).toEqual(["api", "consumer", "outbox", "pending"]);
+  });
+
+  test("reads a subset of roles, tolerating spaces and repeats", () => {
+    expect(loadConfig({ ...validEnv, ROLES: "consumer, api,consumer" }).roles).toEqual(["consumer", "api"]);
+  });
+
+  test("rejects an unknown role instead of silently starting less than asked", () => {
+    expect(() => loadConfig({ ...validEnv, ROLES: "api,consumerr" })).toThrow("consumerr");
+  });
+
+  test("has the SQS consumer defaults", () => {
+    expect(loadConfig(validEnv).sqs).toMatchObject({
+      dlqName: "wager-transactions-dlq.fifo",
+      visibilityTimeoutSeconds: 60,
+      shutdownGraceMs: 10_000,
+    });
+  });
 });

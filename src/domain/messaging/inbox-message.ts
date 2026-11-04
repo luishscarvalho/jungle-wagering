@@ -42,6 +42,10 @@ export class InboxMessage {
     return this._processedAt !== undefined;
   }
 
+  matchesPayload(payloadHash: string): boolean {
+    return this.payloadHash === payloadHash;
+  }
+
   markProcessed(at: Date): void {
     if (this.isProcessed()) {
       throw new InvalidMessageStateError(`Inbox message ${this.messageId} is already processed`);

@@ -1,8 +1,10 @@
 import "reflect-metadata";
+import { ConsoleLogger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
-import { APP_CONFIG, type AppConfig } from "./infrastructure/config";
+import { loadConfig } from "./infrastructure/config";
 
-const app = await NestFactory.create(AppModule);
+const config = loadConfig();
+const app = await NestFactory.create(AppModule.forRoles(config.roles), { logger: new ConsoleLogger({ json: true }) });
 app.enableShutdownHooks();
-await app.listen(app.get<AppConfig>(APP_CONFIG).port);
+await app.listen(config.port);

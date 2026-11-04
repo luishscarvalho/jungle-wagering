@@ -51,6 +51,6 @@ const USE_CASES = [ProcessWagerTransaction, CreateWallet, ReconcileWallet, Walle
       inject: [UNIT_OF_WORK],
     },
   ],
-  exports: USE_CASES,
+  exports: [...USE_CASES, APP_LOGGER],
 })
 export class ApplicationModule {}

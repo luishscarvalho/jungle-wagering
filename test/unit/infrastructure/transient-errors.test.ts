@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DeadlockException, DriverException } from "@mikro-orm/core";
-import { isTransientInfrastructureError } from "../../../../src/infrastructure/http/transient-errors";
+import { isTransientInfrastructureError } from "../../../src/infrastructure/transient-errors";
 
 function withCode(code: string, message = "failed"): Error {
   return Object.assign(new Error(message), { code });

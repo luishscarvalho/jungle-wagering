@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { MikroORM } from "@mikro-orm/postgresql";
 import { randomUUIDv7, type SQL } from "bun";
 import { ReconcileWallet } from "../../../src/application/wallet/reconcile-wallet";
 import {
@@ -9,11 +10,13 @@ import {
   type UnitOfWork,
 } from "../../../src/application/ports";
 import { type ProcessWagerResult, ProcessWagerTransaction } from "../../../src/application/wager/process-wager-transaction";
+import { createOrmConfig } from "../../../src/infrastructure/db/create-orm-config";
 import { PostgresHealthCheck } from "../../../src/infrastructure/http/health/health.checks";
 import {
   createWallet,
   expectBalanceMatchesLedger,
   startTestApp,
+  submit,
   type TestApp,
   wagerBody,
 } from "../../support/test-app";
@@ -140,6 +143,95 @@ describe("safety net for the idempotency unique constraint", () => {
   });
 });
 
+describe("idempotency lookup before the lock", () => {
+  /** Holds the wallet's row lock from another connection for as long as work runs. */
+  async function whileWalletLocked<T>(walletId: string, work: () => Promise<T>): Promise<T> {
+    return sql.begin(async (tx) => {
+      await tx`SELECT id FROM wallets WHERE id = ${walletId} FOR UPDATE`;
+      return work();
+    });
+  }
+
+  test("reusing a key with a payload pointing at a missing wallet is a conflict, not a 404", async () => {
+    const wallet = await createWallet(url);
+    const key = `k-${randomUUIDv7()}`;
+    expect((await submit(url, wagerBody(wallet), key)).status).toBe(200);
+
+    const reused = await submit(url, wagerBody(wallet, { walletId: randomUUIDv7() }), key);
+
+    expect(reused.status).toBe(409);
+    expect(reused.body.failureCode).toBe("IDEMPOTENCY_CONFLICT");
+    await expectBalanceMatchesLedger(sql, wallet.id, "75.00");
+  });
+
+  test("a replay and a conflict are answered while another transaction holds the wallet", async () => {
+    const wallet = await createWallet(url);
+    const key = `k-${randomUUIDv7()}`;
+    const body = wagerBody(wallet);
+    await submit(url, body, key);
+
+    const started = performance.now();
+    const [replay, conflict] = await whileWalletLocked(wallet.id, () =>
+      Promise.all([submit(url, body, key), submit(url, wagerBody(wallet), key)]),
+    );
+
+    expect(replay.status).toBe(200);
+    expect(replay.body.idempotentReplay).toBe(true);
+    expect(conflict.status).toBe(409);
+    expect(performance.now() - started).toBeLessThan(4000);
+  });
+
+  test("the lookup after the lock still decides: a duplicate committed while waiting is a replay", async () => {
+    const wallet = await createWallet(url, "100.00");
+    const key = `k-${randomUUIDv7()}`;
+    const body = wagerBody(wallet);
+
+    const [first, second] = await Promise.all([submit(url, body, key), submit(url, body, key)]);
+
+    expect([first.body.idempotentReplay, second.body.idempotentReplay].sort()).toEqual([false, true]);
+    await expectBalanceMatchesLedger(sql, wallet.id, "75.00");
+  });
+});
+
+describe("lock_timeout", () => {
+  test("a wallet locked for over 5s answers 503, writes nothing and the retry succeeds", async () => {
+    const wallet = await createWallet(url, "100.00");
+    const key = `k-${randomUUIDv7()}`;
+    const body = wagerBody(wallet);
+
+    const started = performance.now();
+    const blocked = await sql.begin(async (tx) => {
+      await tx`SELECT id FROM wallets WHERE id = ${wallet.id} FOR UPDATE`;
+      return submit(url, body, key);
+    });
+    const elapsed = performance.now() - started;
+
+    expect(blocked.status).toBe(503);
+    expect(blocked.body.failureCode).toBe("INFRASTRUCTURE_UNAVAILABLE");
+    // Postgres reschedules this timer by the wall clock, and WSL2 steps it about 2s forward every 30s.
+    expect(elapsed).toBeGreaterThanOrEqual(2500);
+    expect(elapsed).toBeLessThan(7000);
+    expect(await counts(wallet.id)).toEqual({ transactions: 1, entries: 1, events: 1, version: 1 });
+
+    expect((await submit(url, body, key)).status).toBe(200);
+    await expectBalanceMatchesLedger(sql, wallet.id, "75.00");
+  }, 15_000);
+
+  test("the setting does not leak to the pooled connection after the transaction", async () => {
+    const orm = testApp.app.get(MikroORM);
+    await realUnitOfWork.transaction(async () => undefined);
+    const rows = await orm.em.getConnection().execute<{ lock_timeout: string }[]>("SHOW lock_timeout");
+    expect(rows[0]?.lock_timeout).toBe("0");
+  });
+});
+
+describe("DB_POOL_MAX", () => {
+  test("reaches the MikroORM pool", () => {
+    expect(testApp.app.get(MikroORM).config.get("pool").max).toBe(10);
+    expect(createOrmConfig("postgres://u:p@localhost/db", 3).pool?.max).toBe(3);
+  });
+});
+
 describe("inbox", () => {
   const inbox = () => ({ consumerName: "wager-consumer", messageId: `m-${randomUUIDv7()}`, payloadHash: "raw-hash" });
 
@@ -190,12 +282,62 @@ describe("inbox", () => {
     expect(await sql`SELECT id FROM wager_transactions WHERE wallet_id = ${missingWallet}`).toHaveLength(0);
   });
 
-  test("an invalid payload is recorded too", async () => {
+  test("an invalid payload is not recorded, since the consumer dead-letters it", async () => {
     const message = inbox();
     const result = await useCase().execute({ idempotencyKey: "k", payload: { kind: "JACKPOT" }, inbox: message });
 
     expect(result).toMatchObject({ type: "refused", failureCode: "INVALID_PAYLOAD" });
+    expect(await inboxRow(message.messageId)).toBeUndefined();
+  });
+
+  test("a kind not allowed is a refusal, so it is recorded", async () => {
+    const wallet = await createWallet(url);
+    const message = inbox();
+    const result = await useCase().execute({
+      idempotencyKey: `k-${randomUUIDv7()}`,
+      payload: wagerBody(wallet, { kind: "OPENING" }),
+      inbox: message,
+    });
+
+    expect(result).toMatchObject({ type: "refused", failureCode: "KIND_NOT_ALLOWED" });
     expect(await inboxRow(message.messageId)).toBeDefined();
+  });
+
+  test.each(["constructor", "__proto__", "toString"])("kind %s does not resolve through the prototype", async (kind) => {
+    const wallet = await createWallet(url);
+    const result = await useCase().execute({ idempotencyKey: "k", payload: wagerBody(wallet, { kind }) });
+
+    expect(result).toMatchObject({ type: "refused", failureCode: "INVALID_PAYLOAD" });
+  });
+
+  test("the same message id with another hash is a conflict and does nothing", async () => {
+    const wallet = await createWallet(url, "100.00");
+    const message = inbox();
+    await useCase().execute({ idempotencyKey: `k-${randomUUIDv7()}`, payload: wagerBody(wallet), inbox: message });
+
+    const again = await useCase().execute({
+      idempotencyKey: `k-${randomUUIDv7()}`,
+      payload: wagerBody(wallet),
+      inbox: { ...message, payloadHash: "another-hash" },
+    });
+
+    expect(again).toEqual({ type: "message-conflict" });
+    expect((await inboxRow(message.messageId)).payload_hash).toBe("raw-hash");
+    await expectBalanceMatchesLedger(sql, wallet.id, "75.00");
+  });
+
+  test("a refusal with a repeated message id and another hash is still a conflict", async () => {
+    const wallet = await createWallet(url);
+    const message = inbox();
+    await useCase().execute({ idempotencyKey: `k-${randomUUIDv7()}`, payload: wagerBody(wallet), inbox: message });
+
+    const again = await useCase().execute({
+      idempotencyKey: `k-${randomUUIDv7()}`,
+      payload: wagerBody(wallet, { kind: "OPENING" }),
+      inbox: { ...message, payloadHash: "another-hash" },
+    });
+
+    expect(again).toEqual({ type: "message-conflict" });
   });
 
   test("a rollback also undoes the inbox row, so the message can be retried", async () => {

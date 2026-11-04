@@ -10,7 +10,7 @@ import { MikroOrmUnitOfWork } from "./mikro-orm-unit-of-work";
   providers: [
     {
       provide: MikroORM,
-      useFactory: (config: AppConfig) => MikroORM.init(createOrmConfig(config.databaseUrl)),
+      useFactory: (config: AppConfig) => MikroORM.init(createOrmConfig(config.databaseUrl, config.databasePoolMax)),
       inject: [APP_CONFIG],
     },
     {
