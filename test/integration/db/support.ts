@@ -1,11 +1,12 @@
 import { expect } from "bun:test";
 import { MikroORM } from "@mikro-orm/postgresql";
 import { randomUUIDv7, SQL } from "bun";
-import { createOrmConfig } from "../../../src/infrastructure/db/mikro-orm.config";
+import { createOrmConfig } from "../../../src/infrastructure/db/create-orm-config";
 
 export type Row = Record<string, unknown>;
 
 export interface TestDatabase {
+  url: string;
   sql: SQL;
   orm: MikroORM;
   drop(): Promise<void>;
@@ -30,6 +31,7 @@ export async function createTestDatabase(): Promise<TestDatabase> {
   const sql = new SQL(url.toString());
 
   return {
+    url: url.toString(),
     sql,
     orm,
     async drop() {

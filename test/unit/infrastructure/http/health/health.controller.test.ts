@@ -50,20 +50,20 @@ describe("GET /health/ready", () => {
     const url = await start(down, up);
     const res = await fetch(`${url}/health/ready`);
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ status: "error", checks: { postgres: "down", sqs: "up" } });
+    expect(await res.json()).toEqual({ status: "error", failureCode: "INFRASTRUCTURE_UNAVAILABLE", checks: { postgres: "down", sqs: "up" } });
   });
 
   test("is 503 when sqs is down", async () => {
     const url = await start(up, down);
     const res = await fetch(`${url}/health/ready`);
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ status: "error", checks: { postgres: "up", sqs: "down" } });
+    expect(await res.json()).toEqual({ status: "error", failureCode: "INFRASTRUCTURE_UNAVAILABLE", checks: { postgres: "up", sqs: "down" } });
   });
 
   test("is 503 when a check hangs", async () => {
     const url = await start(() => new Promise(() => {}), up);
     const res = await fetch(`${url}/health/ready`);
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ status: "error", checks: { postgres: "down", sqs: "up" } });
+    expect(await res.json()).toEqual({ status: "error", failureCode: "INFRASTRUCTURE_UNAVAILABLE", checks: { postgres: "down", sqs: "up" } });
   }, 5000);
 });

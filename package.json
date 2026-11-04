@@ -7,6 +7,7 @@
     "dev": "bun --watch src/main.ts",
     "test": "bun test test/unit",
     "test:integration": "bun test test/integration",
+    "test:concurrency": "bun test test/concurrency",
     "migration:up": "bun node_modules/@mikro-orm/cli/cli.js migration:up",
     "migration:down": "bun node_modules/@mikro-orm/cli/cli.js migration:down",
     "migration:create": "bun node_modules/@mikro-orm/cli/cli.js migration:create --blank"

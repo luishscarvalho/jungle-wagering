@@ -1,10 +1,13 @@
 import { Controller, Get, Logger, ServiceUnavailableException } from "@nestjs/common";
+import { FailureCode } from "../../../domain/shared/failure-code";
+import { Public } from "../auth.guard";
 import { PostgresHealthCheck, SqsHealthCheck } from "./health.checks";
 
 const CHECK_TIMEOUT_MS = 3000;
 
 type CheckStatus = "up" | "down";
 
+@Public()
 @Controller("health")
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
@@ -28,7 +31,11 @@ export class HealthController {
     const checks = { postgres, sqs };
 
     if (postgres === "down" || sqs === "down") {
-      throw new ServiceUnavailableException({ status: "error", checks });
+      throw new ServiceUnavailableException({
+        status: "error",
+        failureCode: FailureCode.InfrastructureUnavailable,
+        checks,
+      });
     }
     return { status: "ok", checks };
   }

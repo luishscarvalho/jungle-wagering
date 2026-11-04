@@ -1,22 +1,14 @@
 import { GetQueueUrlCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { MikroORM } from "@mikro-orm/postgresql";
 import { Inject, Injectable, type OnModuleDestroy } from "@nestjs/common";
-import { SQL } from "bun";
 import { APP_CONFIG, type AppConfig } from "../../config";
 
 @Injectable()
-export class PostgresHealthCheck implements OnModuleDestroy {
-  private readonly sql: SQL;
-
-  constructor(@Inject(APP_CONFIG) config: AppConfig) {
-    this.sql = new SQL(config.databaseUrl, { max: 1, connectionTimeout: 2 });
-  }
+export class PostgresHealthCheck {
+  constructor(@Inject(MikroORM) private readonly orm: MikroORM) {}
 
   async check(): Promise<void> {
-    await this.sql`SELECT 1`;
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.sql.close();
+    await this.orm.em.getConnection().execute("SELECT 1");
   }
 }
 
