@@ -1,6 +1,42 @@
+x-app-environment: &app-environment
+  DATABASE_URL: postgres://${POSTGRES_USER:-wagering}:${POSTGRES_PASSWORD:-wagering}@postgres:5432/${POSTGRES_DB:-wagering}
+  DB_POOL_MAX: ${DB_POOL_MAX:-10}
+  PORT: 3000
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SQS_ENDPOINT: http://ministack:4566
+  SQS_QUEUE_NAME: wager-transactions.fifo
+  SQS_DLQ_NAME: wager-transactions-dlq.fifo
+  SQS_EVENTS_QUEUE_NAME: wagering-events.fifo
+
+x-app: &app
+  build: .
+  image: jungle-wagering:local
+  depends_on:
+    postgres:
+      condition: service_healthy
+    sqs-init:
+      condition: service_completed_successfully
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    test:
+      - CMD
+      - bun
+      - -e
+      - "fetch('http://localhost:3000/health/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+    interval: 5s
+    timeout: 5s
+    retries: 10
+    start_period: 10s
+  # Longer than SQS_SHUTDOWN_GRACE_MS (10s), so SIGTERM can drain before a SIGKILL.
+  stop_grace_period: 20s
+  restart: unless-stopped
+
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-wagering}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wagering}
@@ -16,7 +52,7 @@ services:
       retries: 10
 
   ministack:
-    image: ministackorg/ministack
+    image: ministackorg/ministack:1.5.36
     ports:
       - "4566:4566"
     healthcheck:
@@ -30,7 +66,7 @@ services:
       retries: 10
 
   sqs-init:
-    image: amazon/aws-cli
+    image: amazon/aws-cli:2.39.3
     depends_on:
       ministack:
         condition: service_healthy
@@ -43,6 +79,36 @@ services:
     volumes:
       - ./infra/sqs:/scripts:ro
     restart: "no"
+
+  migrate:
+    build: .
+    image: jungle-wagering:local
+    command: ["bun", "run", "migration:up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-environment
+    restart: "no"
+
+  app-1:
+    <<: *app
+    environment:
+      <<: *app-environment
+      ROLES: api,consumer,outbox,pending
+    ports:
+      - "3000:3000"
+
+  app-2:
+    <<: *app
+    environment:
+      <<: *app-environment
+      ROLES: consumer,outbox,pending
+
+  app-3:
+    <<: *app
+    environment:
+      <<: *app-environment
+      ROLES: consumer,outbox,pending
 
 volumes:
   postgres-data:
