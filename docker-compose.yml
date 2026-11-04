@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wagering}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wagering}
+      POSTGRES_DB: ${POSTGRES_DB:-wagering}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ministack:
+    image: ministackorg/ministack
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  sqs-init:
+    image: amazon/aws-cli
+    depends_on:
+      ministack:
+        condition: service_healthy
+    entrypoint: ["sh", "/scripts/create-queues.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://ministack:4566
+    volumes:
+      - ./infra/sqs:/scripts:ro
+    restart: "no"
+
+volumes:
+  postgres-data:
