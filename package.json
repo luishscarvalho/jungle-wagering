@@ -5,10 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/main.ts",
-    "test": "bun test"
+    "test": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "migration:up": "bun node_modules/@mikro-orm/cli/cli.js migration:up",
+    "migration:down": "bun node_modules/@mikro-orm/cli/cli.js migration:down",
+    "migration:create": "bun node_modules/@mikro-orm/cli/cli.js migration:create --blank"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1161.0",
+    "@mikro-orm/core": "^7.2.6",
+    "@mikro-orm/migrations": "^7.2.6",
+    "@mikro-orm/postgresql": "^7.2.6",
     "@nestjs/common": "^12.3.2",
     "@nestjs/core": "^12.3.2",
     "@nestjs/platform-express": "^12.3.2",
@@ -16,9 +23,15 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@mikro-orm/cli": "^7.2.6",
     "@nestjs/testing": "^12.3.2",
     "@types/bun": "^1.4.4",
     "@types/express": "^5.0.6",
     "typescript": "^7.0.2"
+  },
+  "mikro-orm": {
+    "configPaths": [
+      "./src/infrastructure/db/mikro-orm.config.ts"
+    ]
   }
 }
