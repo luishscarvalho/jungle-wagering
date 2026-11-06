@@ -93,8 +93,11 @@ function startConsumer(queues: TestQueues, options: ConsumerOptions = {}) {
   return { consumer, logs };
 }
 
-/** Fails the first `times` calls with `error`, then goes through to the real use case. */
-function failingUseCase(times: number, error: Error) {
+/**
+ * Fails the first `times` calls with `error`, then goes through to the real use case.
+ * With `gate`, the calls after the failures wait for it before touching the database.
+ */
+function failingUseCase(times: number, error: Error, gate?: Promise<void>) {
   const real = testApp.app.get(ProcessWagerTransaction);
   const calls = { count: 0 };
   return {
@@ -103,6 +106,7 @@ function failingUseCase(times: number, error: Error) {
       execute: async (input: Parameters<ProcessWagerTransaction["execute"]>[0]) => {
         calls.count += 1;
         if (calls.count <= times) throw error;
+        await gate;
         return real.execute(input);
       },
     },
@@ -440,27 +444,38 @@ describe("transient failures", () => {
     const queues = await queuesFor();
     const wallet = await createWallet(url, "100.00");
     const message = wagerMessage(wallet);
-    const { useCase, calls } = failingUseCase(1, connectionReset());
+    // The 1s backoff can expire before the assertions below (slow or jumpy clocks), so the
+    // redelivery is held at the gate: whatever the timing, nothing is applied until it opens.
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const { useCase, calls } = failingUseCase(1, connectionReset(), gate);
     await sendMessage(queues, message);
 
     const { logs } = startConsumer(queues, { useCase });
     await eventually(
       async () => calls.count,
-      (count) => count === 1,
+      (count) => count >= 1,
     );
     await eventually(
       async () => logs.map((line) => line.message),
       (lines) => lines.includes("Transient failure processing message"),
     );
 
-    expect(await queueCounts(queues)).toEqual({ visible: 0, inFlight: 1 });
+    // Not deleted: still exactly one copy in the queue, visible again or in flight
+    // (under backoff, or redelivered and held at the gate).
+    const counts = await queueCounts(queues);
+    expect(counts.visible + counts.inFlight).toBe(1);
     expect(await readDlq(queues)).toHaveLength(0);
     expect(await inboxRows(message.messageId)).toHaveLength(0);
     expect(await wagers(wallet.id)).toHaveLength(0);
 
+    open();
     await drained(queues);
     expect(calls.count).toBe(2);
     expect(logs.find((line) => line.message === "Message processed")?.context.receiveCount).toBe(2);
+    expect(await inboxRows(message.messageId)).toHaveLength(1);
+    expect(await wagers(wallet.id)).toHaveLength(1);
+    expect(await ledgerCount(wallet.id)).toBe(1);
     await expectBalanceMatchesLedger(sql, wallet.id, "75.00");
   }, LONG);
 
